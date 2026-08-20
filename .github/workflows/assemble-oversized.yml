@@ -1,0 +1,59 @@
+name: Assemble verified oversized file
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.transfer/assemble-current.json'
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-slim
+    env:
+      TRANSFER_BRANCH: ${{ github.event.pull_request.head.ref }}
+      REPO: ${{ github.repository }}
+      TOKEN: ${{ github.token }}
+    steps:
+      - name: Reconstruct and verify oversized file
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          git fetch --depth=100 origin "${TRANSFER_BRANCH}"
+          git checkout -B "${TRANSFER_BRANCH}" FETCH_HEAD
+          manifest=".transfer/assemble-current.json"
+          [ -f "$manifest" ] || { echo "Assembly manifest missing"; exit 1; }
+          python3 - "$manifest" <<'PY'
+          import hashlib, json, pathlib, sys
+          meta = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          out = pathlib.Path(meta['path'])
+          chunks = [pathlib.Path(p) for p in meta['chunks']]
+          out.parent.mkdir(parents=True, exist_ok=True)
+          h = hashlib.sha256(); total = 0
+          with out.open('wb') as dst:
+              for chunk in chunks:
+                  if not chunk.is_file(): raise SystemExit(f"missing chunk: {chunk}")
+                  with chunk.open('rb') as src:
+                      while True:
+                          block = src.read(1024 * 1024)
+                          if not block: break
+                          dst.write(block); h.update(block); total += len(block)
+          digest = h.hexdigest(); print(f"assembled {total} bytes sha256={digest}")
+          if total != meta['size']: raise SystemExit(f"size mismatch: got {total}, expected {meta['size']}")
+          if digest != meta['sha256']: raise SystemExit(f"sha mismatch: got {digest}, expected {meta['sha256']}")
+          PY
+          output="$(python3 -c 'import json; print(json.load(open(".transfer/assemble-current.json"))["path"])')"
+          mapfile -t chunks < <(python3 -c 'import json; print("\n".join(json.load(open(".transfer/assemble-current.json"))["chunks"]))')
+          git lfs install --local
+          git add -- "$output"
+          git rm -- "${chunks[@]}"
+          git commit -m "Assemble verified oversized file: $output"
+          git pull --rebase origin "${TRANSFER_BRANCH}"
+          git push origin HEAD:"${TRANSFER_BRANCH}"
