@@ -1,0 +1,54 @@
+name: Import one Drive file
+
+on:
+  push:
+    paths:
+      - '.transfer/drive-*.json'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Fetch and verify one file
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$(find .transfer -maxdepth 1 -type f -name 'drive-*.json' -print -quit)"
+          python3 - "$manifest" <<'PY'
+          import json, pathlib, subprocess, sys, hashlib
+          mpath = pathlib.Path(sys.argv[1])
+          meta = json.loads(mpath.read_text())
+          out = pathlib.Path(meta['path'])
+          out.parent.mkdir(parents=True, exist_ok=True)
+          url = f"https://drive.usercontent.google.com/download?id={meta['drive_id']}&export=download&confirm=t"
+          subprocess.run(['curl','-fL','--retry','2','--connect-timeout','20','-o',str(out),url], check=True)
+          size = out.stat().st_size
+          sha = hashlib.sha256(out.read_bytes()).hexdigest()
+          print(f"downloaded {size} bytes sha256={sha}")
+          if size != meta['size']:
+              raise SystemExit(f"size mismatch: got {size}, expected {meta['size']}")
+          if sha != meta['sha256']:
+              raise SystemExit(f"sha mismatch: got {sha}, expected {meta['sha256']}")
+          PY
+
+      - name: Commit verified file through Git LFS
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$(find .transfer -maxdepth 1 -type f -name 'drive-*.json' -print -quit)"
+          path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$manifest")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git lfs install --local
+          git add -- "$path"
+          git rm -- "$manifest"
+          git commit -m "Import $path"
+          git push origin HEAD:${GITHUB_REF_NAME}
