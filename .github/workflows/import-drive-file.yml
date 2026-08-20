@@ -1,10 +1,10 @@
-name: Import one chunked Library file
+name: Import one public Drive file
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - '.transfer/import-*.json'
+      - '.transfer/drive-*.json'
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ jobs:
       REPO: ${{ github.repository }}
       TOKEN: ${{ github.token }}
     steps:
-      - name: Reconstruct, verify, LFS-commit exactly one file
+      - name: Import exactly one verified public Drive file
         shell: bash
         run: |
           set -euo pipefail
@@ -29,22 +29,23 @@ jobs:
           git fetch --depth=1 origin "${TRANSFER_BRANCH}"
           git checkout -B "${TRANSFER_BRANCH}" FETCH_HEAD
 
-          manifest="$(find .transfer -maxdepth 1 -type f -name 'import-*.json' -print -quit)"
-          [ -n "$manifest" ] || { echo "No import manifest found"; exit 0; }
+          manifest="$(find .transfer -maxdepth 1 -type f -name 'drive-*.json' -print -quit)"
+          [ -n "$manifest" ] || { echo "No Drive transfer manifest found"; exit 0; }
 
           python3 - "$manifest" <<'PY'
-          import base64, hashlib, json, pathlib, sys
+          import hashlib, json, pathlib, subprocess, sys
           mpath = pathlib.Path(sys.argv[1])
           meta = json.loads(mpath.read_text())
           out = pathlib.Path(meta['path'])
           out.parent.mkdir(parents=True, exist_ok=True)
-          with out.open('wb') as dst:
-              for rel in meta['chunks']:
-                  text = pathlib.Path(rel).read_text().strip()
-                  dst.write(base64.b64decode(text, validate=True))
+          url = f"https://drive.usercontent.google.com/download?id={meta['drive_id']}&export=download&confirm=t"
+          subprocess.run([
+              'curl','-fL','--retry','3','--retry-all-errors','--connect-timeout','20',
+              '--max-time','300','-o',str(out),url
+          ], check=True)
           size = out.stat().st_size
           sha = hashlib.sha256(out.read_bytes()).hexdigest()
-          print(f"reconstructed {size} bytes sha256={sha}")
+          print(f"downloaded {size} bytes sha256={sha}")
           if size != meta['size']:
               raise SystemExit(f"size mismatch: got {size}, expected {meta['size']}")
           if sha != meta['sha256']:
@@ -52,11 +53,8 @@ jobs:
           PY
 
           path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$manifest")"
-          mapfile -t chunks < <(python3 -c 'import json,sys; [print(x) for x in json.load(open(sys.argv[1]))["chunks"]]' "$manifest")
-
           git lfs install --local
           git add -- "$path"
-          git rm -- "$manifest" "${chunks[@]}"
-          git rm -f -- .transfer/drive-paws-up.json 2>/dev/null || true
+          git rm -- "$manifest"
           git commit -m "Import $path"
           git push origin HEAD:"${TRANSFER_BRANCH}"
