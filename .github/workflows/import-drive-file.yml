@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   import:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     env:
       TRANSFER_BRANCH: ${{ github.event.pull_request.head.ref }}
       REPO: ${{ github.repository }}
