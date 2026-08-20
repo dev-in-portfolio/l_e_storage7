@@ -1,0 +1,65 @@
+name: Reconstruct transferred file
+
+on:
+  push:
+    paths:
+      - '.transfer/**/READY'
+
+permissions:
+  contents: write
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Reconstruct and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready="$(find .transfer -type f -name READY -print -quit || true)"
+          if [ -z "$ready" ]; then
+            echo "No ready transfer found; nothing to do."
+            exit 0
+          fi
+          dir="$(dirname "$ready")"
+          python3 - "$dir" <<'PY'
+          import base64, hashlib, json, pathlib, sys
+          d = pathlib.Path(sys.argv[1])
+          meta = json.loads((d / 'manifest.json').read_text())
+          chunks = sorted(d.glob('chunk-*.b64'))
+          if not chunks:
+              raise SystemExit('no chunks found')
+          out = pathlib.Path(meta['path'])
+          out.parent.mkdir(parents=True, exist_ok=True)
+          with out.open('wb') as f:
+              for chunk in chunks:
+                  f.write(base64.b64decode(chunk.read_text().strip(), validate=True))
+          data_hash = hashlib.sha256(out.read_bytes()).hexdigest()
+          if data_hash != meta['sha256']:
+              raise SystemExit(f"SHA256 mismatch: got {data_hash}, expected {meta['sha256']}")
+          if out.stat().st_size != meta['size']:
+              raise SystemExit(f"size mismatch: got {out.stat().st_size}, expected {meta['size']}")
+          print(f"Verified {out}: {out.stat().st_size} bytes, sha256={data_hash}")
+          PY
+
+      - name: Commit reconstructed file
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready="$(find .transfer -type f -name READY -print -quit || true)"
+          [ -n "$ready" ] || exit 0
+          dir="$(dirname "$ready")"
+          path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$dir/manifest.json")"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git lfs install --local
+          git add -- "$path"
+          git rm -r -- "$dir"
+          git commit -m "Import $path"
+          git push origin HEAD:${GITHUB_REF_NAME}
